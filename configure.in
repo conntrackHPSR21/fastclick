@@ -1530,6 +1530,7 @@ if test "x$enable_dpdk" != "xno"; then
 
 
     if test "x$enable_dpdk" = "xyes" && pkg-config --exists libdpdk; then
+      dpdk_sys="meson"
       AC_SUBST(RTE_USE_PKGCONFIG, 1)
       RTE_LIB=$(pkg-config --variable=libdir libdpdk)
       RTE_INCLUDE=$(pkg-config --variable=includedir libdpdk)
@@ -1545,6 +1546,7 @@ if test "x$enable_dpdk" != "xno"; then
 	  DPDK_CFLAGS=$(pkg-config --cflags libdpdk)
       AC_MSG_RESULT([yes])
     else
+      dpdk_sys="make"
       AC_SUBST(RTE_USE_PKGCONFIG, 0)
       RTE_INCLUDE=${RTE_SDK_BIN}/include/
       RTE_LIB="$RTE_SDK_BIN/lib"
@@ -1603,6 +1605,17 @@ version (dpdk-dev or dpdk-devel).
       AC_DEFINE([HAVE_DPDK_READ_CLOCK])
     else
       AC_MSG_RESULT([no])
+    fi
+    
+    
+    AC_MSG_CHECKING([whether DPDK has support for Lazy HT])
+    if grep "lifetime" "$RTE_SDK/lib/librte_hash/rte_hash.h" &> /dev/null ; then
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([HAVE_DPDK_LAZY_HT])
+	dpdk_lazy_ht="yes"
+    else
+	AC_MSG_RESULT([no])
+	dpdk_lazy_ht="no"
     fi
 fi
 
@@ -2491,6 +2504,9 @@ if test "x$enable_dpdk" != "xno"; then
     if test "$rte_ver_year" -ge 17; then
         provisions="$provisions dpdk17"
     fi
+    if test "x$dpdk_lazy_ht" = "xyes"; then
+	provisions="$provisions dpdk_lazyht"
+    fi
 fi
 
 dnl add 'dpdk-packet' if compiled with --enable-dpdk-packet
@@ -2679,7 +2695,10 @@ fi
 if test "x$enable_dpdk" != "xno"; then
     dpdk_info="${enable_dpdk}
     DPDK    Target:              ${RTE_TARGET}
-    DPDK   Version:              ${RTE_VER_YEAR}.${RTE_VER_MONTH}"
+    DPDK   Version:              ${RTE_VER_YEAR}.${RTE_VER_MONTH}
+    DPDK      Path:              ${RTE_SDK}
+    DPDK     build:              ${dpdk_sys}
+    DPDK    lazyHT:              ${dpdk_lazy_ht}"
 else
     dpdk_info=${enable_dpdk}
 fi

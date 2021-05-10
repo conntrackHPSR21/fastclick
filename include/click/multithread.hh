@@ -522,7 +522,7 @@ class not_shared { public:
 
     class ptr { public:
         inline ptr() : _v(0) {};
-        inline ptr(shared<T>* v) : _v(v) {_v->get();}
+        inline ptr(not_shared<T>* v) : _v(v) {_v->get();}
         inline ~ptr() {
             release();
         }
@@ -545,7 +545,7 @@ class not_shared { public:
         }
 
 
-        inline void assign(shared<T>* v) {
+        inline void assign(not_shared<T>* v) {
             release();
             _v = v;
             _v->get();

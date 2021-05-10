@@ -1,27 +1,11 @@
-/*
- * FlowIPManagerSpinlock.{cc,hh} - SpinLock-protected version of FlowIPManger
- *
- * Copyright (c) 2019-2020 Tom Barbette, KTH Royal Institute of Technology
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, subject to the conditions
- * listed in the Click LICENSE file. These conditions include: you must
- * preserve this copyright notice, and you cannot mention the copyright
- * holders in advertising related to the Software without their permission.
- * The Software is provided WITHOUT ANY WARRANTY, EXPRESS OR IMPLIED. This
- * notice is a summary of the Click LICENSE file; the license in that file is
- * legally binding.
- */
-
 #include <click/config.h>
 #include <click/glue.hh>
 #include <click/args.hh>
 #include <click/ipflowid.hh>
 #include <click/routervisitor.hh>
 #include <click/error.hh>
-#include "flowipmanagerspinlock.hh"
 #include <rte_hash.h>
+#include "flowipmanagerspinlock.hh"
 #include <click/dpdk_glue.hh>
 #include <rte_ethdev.h>
 
@@ -29,200 +13,99 @@ CLICK_DECLS
 
 Spinlock FlowIPManagerSpinlock::hash_table_lock;
 
-FlowIPManagerSpinlock::FlowIPManagerSpinlock() : _verbose(1), _flags(0), _timer(this), _task(this)
+int
+FlowIPManagerSpinlock::alloc(int i)
 {
-}
+    if (_tables[0].hash == 0)
+    {
 
-FlowIPManagerSpinlock::~FlowIPManagerSpinlock()
-{
+	struct rte_hash_parameters hash_params = {0};
+	char buf[32];
+
+	hash_params.name = buf;
+	hash_params.entries = _table_size;
+	hash_params.key_len = sizeof(IPFlow5ID);
+	hash_params.hash_func = ipv4_hash_crc;
+	hash_params.hash_func_init_val = 0;
+	hash_params.extra_flag = RTE_HASH_EXTRA_FLAGS_NO_FREE_ON_DEL;
+
+	VPRINT(1,"Real capacity for each table will be %lu", _table_size);
+
+
+	sprintf(buf, "SPIN-%i", i);
+	_tables[0].hash = rte_hash_create(&hash_params);
+
+	if(unlikely(_tables[0].hash == nullptr))
+	{
+	    VPRINT(0,"Could not init flow table %d!", 0);
+	    return 1;
+	}
+    }
+    else
+	VPRINT(1,"alloc on thread %i: ignore");
+    return 0;
 }
 
 int
-FlowIPManagerSpinlock::configure(Vector<String> &conf, ErrorHandler *errh)
+FlowIPManagerSpinlock::find(IPFlow5ID &f, int core)
 {
-    if (Args(conf, this, errh)
-        .read_or_set_p("CAPACITY", _table_size, 65536)
-        .read_or_set("RESERVE", _reserve, 0)
-        .read_or_set("TIMEOUT", _timeout, 60)
-        .complete() < 0)
-        return -1;
+    core = 0;
 
-    if (!is_pow2(_table_size)) {
-        _table_size = next_pow2(_table_size);
-        click_chatter("Real capacity will be %d",_table_size);
-    }
+    auto& tab = _tables[core];
+    rte_hash * ht = reinterpret_cast<rte_hash*>(tab.hash);
+    uint64_t this_flow=0;
 
-    find_children(_verbose);
-
-    router()->get_root_init_future()->postOnce(&_fcb_builded_init_future);
-    _fcb_builded_init_future.post(this);
-
-    return 0;
-}
-
-
-int FlowIPManagerSpinlock::solve_initialize(ErrorHandler *errh)
-{
-    struct rte_hash_parameters hash_params = {0};
-    char buf[32];
-    hash_params.name = buf;
-    hash_params.entries = _table_size;
-    hash_params.key_len = sizeof(IPFlow5ID);
-    hash_params.hash_func = ipv4_hash_crc;
-    hash_params.hash_func_init_val = 0;
-    hash_params.extra_flag = _flags;
-    FlowIPManagerSpinlock::hash_table_lock = Spinlock();
-
-    _flow_state_size_full = sizeof(FlowControlBlock) + _reserve;
-
-    sprintf(buf, "%s", name().c_str());
-    hash = rte_hash_create(&hash_params);
-    if (!hash)
-        return errh->error("Could not init flow table !");
-
-    fcbs =  (FlowControlBlock*)CLICK_ALIGNED_ALLOC(_flow_state_size_full * _table_size);
-    bzero(fcbs,_flow_state_size_full * _table_size);
-    CLICK_ASSERT_ALIGNED(fcbs);
-    if (!fcbs)
-        return errh->error("Could not init data table !");
-
-    if (_timeout > 0) {
-        _timer_wheel.initialize(_timeout);
-    }
-
-    _timer.initialize(this);
-    _timer.schedule_after(Timestamp::make_sec(1));
-    _task.initialize(this, false);
-    return 0;
-}
-
-const auto setter = [](FlowControlBlock* prev, FlowControlBlock* next)
-{
-    *((FlowControlBlock**)&prev->data_32[2]) = next;
-};
-
-bool FlowIPManagerSpinlock::run_task(Task* t)
-{
-    Timestamp recent = Timestamp::recent_steady();
-    _timer_wheel.run_timers([this,recent](FlowControlBlock* prev) -> FlowControlBlock*{
-        FlowControlBlock* next = *((FlowControlBlock**)&prev->data_32[2]);
-        int old = (recent - prev->lastseen).sec();
-        if (old > _timeout) {
-            // click_chatter("Release %p as it is expired since %d", prev, old);
-            // expire
-            FlowIPManagerSpinlock::hash_table_lock.acquire();
-            rte_hash_free_key_with_position(hash, prev->data_32[0]);
-            FlowIPManagerSpinlock::hash_table_lock.release();
-        } else {
-            // click_chatter("Cascade %p", prev);
-            // No need for lock as we'll be the only one to enqueue there
-            _timer_wheel.schedule_after(prev, _timeout - (recent - prev->lastseen).sec(),setter);
-        }
-        return next;
-    });
-    return true;
-}
-
-void FlowIPManagerSpinlock::run_timer(Timer* t)
-{
-    _task.reschedule();
-    t->reschedule_after(Timestamp::make_sec(1));
-}
-
-void FlowIPManagerSpinlock::cleanup(CleanupStage stage)
-{
-    if (hash)
-    {
-        FlowIPManagerSpinlock::hash_table_lock.acquire();
-        rte_hash_free(hash);
-        FlowIPManagerSpinlock::hash_table_lock.release();
-    }
-}
-
-void FlowIPManagerSpinlock::process(Packet* p, BatchBuilder& b, const Timestamp& recent)
-{
-    IPFlow5ID fid = IPFlow5ID(p);
-    rte_hash*& table = hash;
-    FlowControlBlock* fcb;
-
+    //int ret = rte_hash_lookup_data(ht, &f, (void **)&this_flow);
+    
     FlowIPManagerSpinlock::hash_table_lock.acquire();
-    int ret = rte_hash_lookup(table, &fid);
-
-    if (ret < 0) { // new flow
-        ret = rte_hash_add_key(table, &fid);
-        if (ret < 0) {
-            if (unlikely(_verbose > 0)) {
-                click_chatter("Cannot add key (have %d items. Error %d)!", rte_hash_count(table), ret);
-            }
-            p->kill();
-            return;
-        }
-        fcb = (FlowControlBlock*)((unsigned char*)fcbs + (_flow_state_size_full * ret));
-        fcb->data_32[0] = ret;
-        if (_timeout) {
-            if (_flags) {
-                _timer_wheel.schedule_after_mp(fcb, _timeout, setter);
-            } else {
-                _timer_wheel.schedule_after(fcb, _timeout, setter);
-            }
-        }
-    } else {
-        fcb = (FlowControlBlock*)((unsigned char*)fcbs + (_flow_state_size_full * ret));
-    }
-
+    int ret = rte_hash_lookup_data(ht, &f, (void **)&this_flow);
     FlowIPManagerSpinlock::hash_table_lock.release();
-    if (b.last == ret) {
-        b.append(p);
-    } else {
-        PacketBatch* batch;
-        batch = b.finish();
-        if (batch) {
-            fcb_stack->lastseen = recent;
-            output_push_batch(0, batch);
-        }
-        fcb_stack = fcb;
-        b.init();
-        b.append(p);
-    }
+    //click_chatter("FIND: %u -> %i -> %c", hash, ret, (ret>0) ?'Y' : 'N');
+    return ret>=0 ? this_flow : 0;
+
 }
 
-void FlowIPManagerSpinlock::push_batch(int, PacketBatch* batch)
+int
+FlowIPManagerSpinlock::insert(IPFlow5ID &f, int flowid, int core)
 {
-    BatchBuilder b;
-    Timestamp recent = Timestamp::recent_steady();
-    FOR_EACH_PACKET_SAFE(batch, p) {
-        process(p, b, recent);
-    }
+    core = 0;
 
-    batch = b.finish();
-    if (batch) {
-    fcb_stack->lastseen = recent;
-        output_push_batch(0, batch);
-    }
+    auto& tab = _tables[core];
+    rte_hash * ht = reinterpret_cast<rte_hash *> (tab.hash);
+
+    uint64_t ff = flowid;
+    FlowIPManagerSpinlock::hash_table_lock.acquire();
+    uint32_t ret = rte_hash_add_key_data(ht, &f, (void *) ff);
+    FlowIPManagerSpinlock::hash_table_lock.release();
+    ff = 1234;
+
+    //TODO: What is the correct return value?
+    return ret == 0 ? flowid : 0;
 }
 
-enum {h_count};
-String FlowIPManagerSpinlock::read_handler(Element* e, void* thunk)
-{
-    FlowIPManagerSpinlock* fc = static_cast<FlowIPManagerSpinlock*>(e);
 
-    rte_hash* table = fc->hash;
-    switch ((intptr_t)thunk) {
-    case h_count:
-        FlowIPManagerSpinlock::hash_table_lock.acquire();
-        return String(rte_hash_count(table));
-        FlowIPManagerSpinlock::hash_table_lock.release();
-    default:
-        return "<error>";
-    }
-};
-
-void FlowIPManagerSpinlock::add_handlers()
+int FlowIPManagerSpinlock::delete_flow(FlowControlBlock * fcb, int core)
 {
+    core = 0;
+    FlowIPManagerSpinlock::hash_table_lock.acquire();
+    int ret = rte_hash_del_key(reinterpret_cast<rte_hash *> (_tables[core].hash), get_fid(fcb));
+    FlowIPManagerSpinlock::hash_table_lock.release();
+    VPRINT(2,"Deletion of entry %p, belonging to flow %i , returned %i: %s", fcb, 
+		*get_flowid(fcb), ret, (ret >=0 ? "OK" : ret == -ENOENT ? "ENOENT" : "EINVAL" ));
+
+    return ret;
+}
+
+int FlowIPManagerSpinlock::free_pos(int pos, int core)
+{
+    core = 0;
+    FlowIPManagerSpinlock::hash_table_lock.acquire();
+    return rte_hash_free_key_with_position(reinterpret_cast<rte_hash *> (_tables[core].hash), pos);
+    FlowIPManagerSpinlock::hash_table_lock.release();
 }
 
 CLICK_ENDDECLS
 
-ELEMENT_REQUIRES(FlowIPManager)
+ELEMENT_REQUIRES(flow dpdk dpdk19)
 EXPORT_ELEMENT(FlowIPManagerSpinlock)
 ELEMENT_MT_SAFE(FlowIPManagerSpinlock)

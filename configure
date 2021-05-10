@@ -12823,6 +12823,7 @@ $as_echo_n "checking for DPDK library... " >&6; }
 
 
     if test "x$enable_dpdk" = "xyes" && pkg-config --exists libdpdk; then
+      dpdk_sys="meson"
       RTE_USE_PKGCONFIG=1
 
       RTE_LIB=$(pkg-config --variable=libdir libdpdk)
@@ -12840,6 +12841,7 @@ $as_echo_n "checking for DPDK library... " >&6; }
       { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
 $as_echo "yes" >&6; }
     else
+      dpdk_sys="make"
       RTE_USE_PKGCONFIG=0
 
       RTE_INCLUDE=${RTE_SDK_BIN}/include/
@@ -12913,6 +12915,21 @@ $as_echo "yes" >&6; }
     else
       { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
 $as_echo "no" >&6; }
+    fi
+
+
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking whether DPDK has support for Lazy HT" >&5
+$as_echo_n "checking whether DPDK has support for Lazy HT... " >&6; }
+    if grep "lifetime" "$RTE_SDK/lib/librte_hash/rte_hash.h" &> /dev/null ; then
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+$as_echo "yes" >&6; }
+	$as_echo "#define HAVE_DPDK_LAZY_HT 1" >>confdefs.h
+
+	dpdk_lazy_ht="yes"
+    else
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+$as_echo "no" >&6; }
+	dpdk_lazy_ht="no"
     fi
 fi
 
@@ -16173,6 +16190,9 @@ if test "x$enable_dpdk" != "xno"; then
     if test "$rte_ver_year" -ge 17; then
         provisions="$provisions dpdk17"
     fi
+    if test "x$dpdk_lazy_ht" = "xyes"; then
+	provisions="$provisions dpdk_lazyht"
+    fi
 fi
 
 if test "x$enable_dpdk_packet" = xyes; then
@@ -17670,7 +17690,10 @@ fi
 if test "x$enable_dpdk" != "xno"; then
     dpdk_info="${enable_dpdk}
     DPDK    Target:              ${RTE_TARGET}
-    DPDK   Version:              ${RTE_VER_YEAR}.${RTE_VER_MONTH}"
+    DPDK   Version:              ${RTE_VER_YEAR}.${RTE_VER_MONTH}
+    DPDK      Path:              ${RTE_SDK}
+    DPDK     build:              ${dpdk_sys}
+    DPDK    lazyHT:              ${dpdk_lazy_ht}"
 else
     dpdk_info=${enable_dpdk}
 fi

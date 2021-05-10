@@ -5,39 +5,39 @@
 #include <click/timer.hh>
 #include <click/vector.hh>
 #include <click/multithread.hh>
-#include <click/batchelement.hh>
 #include <click/pair.hh>
+#include <click/flow/flowelement.hh>
 #include <click/flow/common.hh>
 #include <click/batchbuilder.hh>
-#include "flowipmanager.hh"
+#include <click/virtualflowipmanagerimp.hh>
+#include <rte_hash.h>
 
-CLICK_DECLS
-class DPDKDevice;
-struct rte_hash;
 
-/**
- * FlowIPManagerMP(...)
- *
- * =s flow
- *  FCB packet classifier, cuckoo thread-safe implementation
- *
- * =d
- *  Multi-thread equivalent of FlowIPManager. This version uses DPDK's
- *  thread-safe implementation of cuckoo hash table to ensure thread safeness.
- *
- *  See FlowIPManager documentation for usage.
- *
- * =a FlowIPManger
- */
-class FlowIPManagerMP: public FlowIPManager {
-    public:
-        FlowIPManagerMP() CLICK_COLD;
-        ~FlowIPManagerMP() CLICK_COLD;
 
-        const char *class_name() const override { return "FlowIPManagerMP"; }
-        const char *port_count() const override { return "1/1"; }
-        const char *processing() const override { return PUSH; }
+// DPDK hash tables, per core duplication
+
+class FlowIPManagerMP: public VirtualFlowIPManagerIMP<Spinlock,false,true,maintainerArgMP> {
+  public:
+
+    const char *class_name() const { return "FlowIPManagerMP"; }
+	// By default, with no_free_on_delete and deferred free
+	FlowIPManagerMP(): VirtualFlowIPManagerIMP() {}
+
+    protected:
+	int find(IPFlow5ID &f, int core=0) override;
+	int insert(IPFlow5ID &f, int flowid, int core=0) override;
+	int alloc(int i) override;
+	int delete_flow(FlowControlBlock * fcb, int core) override;
+	int free_pos(int pos, int core) override;
+	int parse(Args * args) override;
+
+
+	int _flags;
+	bool _lf;
+
+
 };
+
 
 CLICK_ENDDECLS
 #endif
